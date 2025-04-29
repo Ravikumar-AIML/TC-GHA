@@ -1,40 +1,80 @@
-name: CI Pipeline
+name: Build UltiPro Package
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    env:
+      PRODUCT: "UltiPro"
+      ENVIRONMENT_TYPE: "sql"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python (if required)
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Example - Use Azure OpenAI Secret
-        env:
-          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
-          AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
-        run: |
-          echo "Using Azure OpenAI Endpoint: $AZURE_OPENAI_ENDPOINT"
-          # Your script commands here...
-
-      - name: Example - SSH
+      - name: Setup SSH Keys
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Example - Service User Credentials
-        env:
-          USERNAME: ${{ secrets.BND_TC_SVC_USER }}
-          PASSWORD: ${{ secrets.BND_TC_SVC_PASS }}
+      - name: Fetch Tags from Git
+        shell: powershell
         run: |
-          echo "Login using username $USERNAME"
-          # Your authentication commands here...
+          git fetch origin +refs/tags/*:refs/tags/*
+
+      - name: Setup Parameters & Execute Build Script
+        shell: powershell
+        env:
+          BND_TC_SVC_USER: ${{ secrets.BND_TC_SVC_USER }}
+          BND_TC_SVC_PASS: ${{ secrets.BND_TC_SVC_PASS }}
+        run: |
+          $Credential = New-Object pscredential ($env:BND_TC_SVC_USER, (ConvertTo-SecureString $env:BND_TC_SVC_PASS -AsPlainText -Force))
+          ./scripts/build.ps1 -Credential $Credential -Product $env:PRODUCT
+
+      - name: Generate Dummy Artifacts
+        shell: powershell
+        run: |
+          mkdir artifacts
+          "Sample Artifact Data" | Out-File artifacts/ServerUpdater.Package.zip
+          "{}" | Out-File artifacts/owner_changelist.json
+          "changedfiles.txt content" | Out-File artifacts/changedfiles.txt
+
+      - name: Validate Workflow with Azure OpenAI
+        shell: powershell
+        env:
+          OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
+        run: |
+          $headers = @{
+            "Content-Type" = "application/json"
+            "api-key" = $env:OPENAI_KEY
+          }
+
+          $prompt = @"
+          Review the provided GitHub Actions YAML and PowerShell scripts. Suggest any improvements, errors, or enhancements clearly.
+          "@
+
+          $body = @{
+            prompt = $prompt
+            max_tokens = 600
+          } | ConvertTo-Json
+
+          $response = Invoke-RestMethod `
+            -Uri "$env:OPENAI_ENDPOINT/openai/deployments/gpt-4/completions?api-version=2023-12-01-preview" `
+            -Method Post -Headers $headers -Body $body
+
+          $response.choices[0].text | Out-File -FilePath artifacts/OpenAI-Review.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: UltiPro-Build-Artifacts
+          path: artifacts/
+
+      - name: Cleanup
+        shell: powershell
+        run: Write-Host "Cleanup completed successfully."

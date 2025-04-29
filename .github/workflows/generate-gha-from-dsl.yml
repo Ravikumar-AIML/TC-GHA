@@ -1,0 +1,56 @@
+name: Generate GHA YAML from TeamCity DSL
+
+on:
+  workflow_dispatch:   # Allows manual trigger
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Read DSL file content
+        id: read_dsl
+        run: |
+          echo "Reading the DSL Kotlin file..."
+          content=$(cat teamcity-dsl-code/id10BuildPackage.kt)
+          echo "dsl_content<<EOF" >> $GITHUB_ENV
+          echo "$content" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Generate GitHub Actions YAML via Azure OpenAI
+        id: generate_yaml
+        run: |
+          echo "Calling Azure OpenAI to generate GitHub Actions YAML..."
+
+          prompt=$(cat <<EOF
+Convert the following TeamCity Kotlin DSL build script into an equivalent GitHub Actions YAML workflow file. Ensure the structure is correct, including `on:`, `jobs:`, `steps:`. The script:
+---
+${{ env.dsl_content }}
+---
+EOF
+)
+
+          body=$(jq -n --arg prompt "$prompt" '{
+            "messages": [{"role": "system", "content": "You are a DevOps expert converting CI/CD scripts."},
+                         {"role": "user", "content": $prompt}],
+            "temperature": 0.2,
+            "max_tokens": 2000
+          }')
+
+          curl -s -X POST "$AZURE_OPENAI_ENDPOINT/openai/deployments/gpt-4/chat/completions?api-version=2023-12-01-preview" \
+            -H "Content-Type: application/json" \
+            -H "api-key: $AZURE_OPENAI_KEY" \
+            -d "$body" > response.json
+
+      - name: Extract Generated YAML
+        run: |
+          cat response.json | jq -r '.choices[0].message.content' > generated-github-actions.yml
+
+      - name: Upload Generated GHA YAML as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Generated-GitHub-Action-YAML
+          path: generated-github-actions.yml
